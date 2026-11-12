@@ -1,0 +1,46 @@
+name: Converter regression proof
+on:
+  push:
+    branches: [proof-convert-chain]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  proof:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    services:
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+        options: --health-cmd 'redis-cli ping' --health-interval 5s --health-timeout 3s --health-retries 5
+    env:
+      REDIS_URL: redis://localhost:6379
+      NEXT_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec biome check lib/convert.ts tests/convert.test.mjs scripts/test-convert.mjs
+      - run: pnpm exec tsc --noEmit --incremental false
+      - run: node --experimental-strip-types --test tests/convert.test.mjs
+      - run: pnpm build
+      - name: Check conversions through MCP SSE and Redis
+        shell: bash
+        run: |
+          node node_modules/next/dist/bin/next start > /tmp/next.log 2>&1 &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true; wait "$server" 2>/dev/null || true; cat /tmp/next.log' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:3000/ > /tmp/ready.html; then break; fi
+            sleep 1
+          done
+          node scripts/test-convert.mjs
